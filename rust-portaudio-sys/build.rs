@@ -19,155 +19,76 @@
 // IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-extern crate pkg_config;
+extern crate cmake;
+use cmake::Config;
+
+extern crate bindgen;
+use bindgen::{Builder, CargoCallbacks};
 
 use std::env;
-use std::fmt::Display;
-use std::path::Path;
-use std::process::Command;
-
-#[cfg(all(unix, not(target_os = "linux")))]
-use unix_platform as platform;
+use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
-    println!("cargo:rerun-if-env-changed=PORTAUDIO_ONLY_STATIC");
-    if env::var("PORTAUDIO_ONLY_STATIC").is_err() {
-        // If pkg-config finds a library on the system, we are done
-        if pkg_config::Config::new().atleast_version("19").find("portaudio-2.0").is_ok() {
-            return;
-        }
-    }
+    build_lib();
 
-    build();
+    let bindings = Builder::default()
+        .header("portaudio/include/portaudio.h")
+        .whitelist_function("[pP]a.*")
+        .whitelist_var("[pP]a.*")
+        .whitelist_type("[pP]a.*")
+        .constified_enum("[pP]a.*")
+        .blacklist_type("PaStreamCallbackResult")
+        .parse_callbacks(Box::new(CargoCallbacks))
+        .generate()
+        .expect("Unable to generate bindings");
+
+    let out_path = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out_path.join("bindings.rs"))
+        .expect("Couldn't write bindings");
 }
 
-fn build() {
-    // retrieve cargo deps out dir
-    let out_dir_str = env::var("OUT_DIR").unwrap();
-    let out_dir = Path::new(&out_dir_str);
+fn build_lib() {
+    // Current git revision of PortAudio
+    let revision = git2::Repository::open("portaudio")
+        .unwrap()
+        .head()
+        .unwrap()
+        .target()
+        .unwrap()
+        .to_string();
 
-    let static_lib = out_dir.join("lib/libportaudio.a");
-    if let Err(_) = ::std::fs::metadata(static_lib) {
-        platform::download();
-        platform::build(out_dir);
+    let dst = Config::new("portaudio")
+        .cflag(format!("-DPA_GIT_REVISION={}", revision))
+        .define("CMAKE_BUILD_TYPE", "RELEASE")
+        .very_verbose(true)
+        .build();
+
+    if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-lib=framework=Carbon");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=AudioToolbox");
+        println!("cargo:rustc-link-lib=framework=CoreAudio");
     }
 
-    platform::print_libs(out_dir);
-}
-
-// Similar to unwrap, but panics on just the error value
-#[allow(dead_code)]
-fn err_to_panic<T, E: Display>(result: Result<T, E>) -> T {
-    match result {
-        Ok(x) => x,
-        Err(e) => panic!("{}", e)
-    }
-}
-
-fn run(command: &mut Command) {
-    let string = format!("{:?}", command);
-    let status = err_to_panic(command.status());
-    if !status.success() {
-        panic!("`{}` did not execute successfully", string);
-    }
-}
-
-#[allow(dead_code)]
-mod unix_platform {
-    use std::process::Command;
-    use std::path::Path;
-
-    use std::env;
-
-    use super::{err_to_panic, run};
-
-    pub const PORTAUDIO_URL: &'static str = "http://www.portaudio.com/archives/pa_stable_v19_20140130.tgz";
-    pub const PORTAUDIO_TAR: &'static str = "pa_stable_v19_20140130.tgz";
-    pub const PORTAUDIO_FOLDER: &'static str = "portaudio";
-
-    pub fn download() {
-        run(Command::new("curl").arg(PORTAUDIO_URL).arg("-O"));
+    if cfg!(target_os = "linux") {
+        println!("cargo:rustc-link-lib=static=asound");
+        todo!();
     }
 
-    pub fn build(out_dir: &Path) {
-        // untar portaudio sources
-        run(Command::new("tar").arg("xvf").arg(PORTAUDIO_TAR));
-
-        // change dir to the portaudio folder
-        err_to_panic(env::set_current_dir(PORTAUDIO_FOLDER));
-
-        // run portaudio autoconf
-        run(Command::new("./configure")
-            .args(&["--disable-shared", "--enable-static"]) // Only build static lib
-            .args(&["--prefix", out_dir.to_str().unwrap()]) // Install on the outdir
-            .arg("--with-pic")); // Build position-independent code (required by Rust)
-
-        // then make
-        run(&mut Command::new("make"));
-
-        // "install" on the outdir
-        run(Command::new("make").arg("install"));
-
-        // return to rust-portaudio root
-        err_to_panic(env::set_current_dir(".."));
-
-        // cleaning portaudio sources
-        run(Command::new("rm").arg("-rf")
-            .args(&[PORTAUDIO_TAR, PORTAUDIO_FOLDER]));
+    if cfg!(target_os = "windows") {
+        todo!();
     }
 
-    pub fn print_libs(out_dir: &Path) {
-        let out_str = out_dir.to_str().unwrap();
-        println!("cargo:rustc-flags=-L native={}/lib -l static=portaudio", out_str);
-    }
-}
-
-#[cfg(target_os = "linux")]
-mod platform {
-    use pkg_config;
-    use std::process::Command;
-    use super::unix_platform;
-    use std::path::Path;
-
-    use super::{run, err_to_panic};
-
-    pub fn download() {
-        run(Command::new("wget").arg(unix_platform::PORTAUDIO_URL));
-    }
-
-    pub fn build(out_dir: &Path) {
-        unix_platform::build(out_dir);
-    }
-
-    pub fn print_libs(out_dir: &Path) {
-        let portaudio_pc_file = out_dir.join("lib/pkgconfig/portaudio-2.0.pc");
-        let portaudio_pc_file = portaudio_pc_file.to_str().unwrap();
-
-        err_to_panic(pkg_config::Config::new().statik(true).find(portaudio_pc_file));
-    }
-}
-
-#[cfg(windows)]
-mod platform {
-    use std::path::Path;
-
-    const PORTAUDIO_DOWNLOAD_URL: &'static str = "http://www.portaudio.com";
-
-    fn print_lib_url() {
-        panic!("Don't know how to build portaudio on Windows yet. Sources and build instructions available at: {}", PORTAUDIO_DOWNLOAD_URL);
-    }
-
-    pub fn download() {
-        print_lib_url();
-    }
-
-    pub fn build(_: &Path) {
-        print_lib_url();
-    }
-
-    pub fn print_libs(_: &Path) {
-        print_lib_url();
+    if cfg!(feature = "static") {
+        println!(
+            "cargo:rustc-link-search=native={}",
+            dst.join("build").display()
+        );
+        println!("cargo:rustc-link-lib=static=portaudio_static");
+    } else {
+        todo!("Dynamic linking not yet supported")
     }
 }

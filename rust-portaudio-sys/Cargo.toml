@@ -16,4 +16,11 @@ name = "portaudio_sys"
 crate-type = ["rlib"]
 
 [build-dependencies]
-pkg-config = "0.3.6"
+bindgen = "0.55.1"
+cmake = "0.1"
+git2 = { version = "0.13", default-features = false }
+
+[features]
+default = ["static"]
+
+static = []

@@ -5,13 +5,13 @@
                        --blacklist-type PaStreamCallbackResult
 */
 
-#[cfg(any(target_os="macos", target_os="linux", target_os="win32", target_os="windows"))]
-mod c_library {
-    #[link(name = "portaudio")]
-    extern {}
-}
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
 
-mod portaudio;
+mod portaudio {
+    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
 
 pub use portaudio::*;
 
